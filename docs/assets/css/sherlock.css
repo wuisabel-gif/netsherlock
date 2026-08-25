@@ -86,8 +86,18 @@ body {
 }
 
 .site-nav a:hover,
-.site-nav a:focus {
+.site-nav a:focus,
+.github-link:hover,
+.github-link:focus {
   border-color: var(--brass);
+}
+
+.github-link {
+  border: 2px solid var(--brass);
+  padding: 0.25rem 0.75rem;
+  color: var(--paper);
+  text-decoration: none;
+  transition: background 0.2s, color 0.2s;
 }
 
 main {
@@ -324,6 +334,17 @@ pre {
   padding: 1.5rem;
   font-size: 0.9rem;
   border-top: 4px solid var(--brass);
+}
+
+.footer-links a {
+  color: var(--brass-light);
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+}
+
+.footer-links a:hover,
+.footer-links a:focus {
+  border-color: var(--brass-light);
 }
 
 .site-footer p {
