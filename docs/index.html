@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NetSherlock — The Network Detective</title>
+  <meta name="description" content="NetSherlock: a general-purpose network diagnostics CLI that gathers evidence, reasons from it, and tells you what to investigate next.">
+  <link rel="stylesheet" href="assets/css/sherlock.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="brand">
+      <span class="magnifying-glass" aria-hidden="true">🔍</span>
+      <div class="brand-text">
+        <h1>NetSherlock</h1>
+        <p class="tagline">The network detective. No guesswork, only evidence.</p>
+      </div>
+    </div>
+    <nav class="site-nav" aria-label="Primary">
+      <a href="#case">The Case</a>
+      <a href="#evidence">Evidence</a>
+      <a href="#method">Method</a>
+      <a href="#install">Install</a>
+      <a href="#docs">Docs</a>
+    </nav>
+  </header>
+
+  <main>
+    <section class="hero" id="case">
+      <div class="hero-card">
+        <h2>Why can’t machine A talk to machine B?</h2>
+        <p>NetSherlock investigates the scene. It collects structured evidence, compares observations, and reports only what the facts support — never more.</p>
+        <div class="hero-actions">
+          <a class="button primary" href="#install">Start the investigation</a>
+          <a class="button secondary" href="https://github.com/wuisabel-gif/netsherlock">View on GitHub</a>
+        </div>
+      </div>
+      <aside class="case-file" aria-label="Sample case file">
+        <h3>Case file: database.example.com:5432</h3>
+        <div class="file-line"><span class="check ok">✓</span> DNS resolved to 10.0.0.31</div>
+        <div class="file-line"><span class="check ok">✓</span> Host reachable, 2.4 ms</div>
+        <div class="file-line"><span class="check fail">✗</span> TCP/5432 connection refused</div>
+        <div class="verdict">
+          <strong>Verdict:</strong> The host is reachable, but nothing accepted TCP/5432. Investigate whether the service is listening, bound elsewhere, or a firewall is rejecting the connection.
+        </div>
+      </aside>
+    </section>
+
+    <section class="evidence" id="evidence">
+      <h2>Evidence, not speculation</h2>
+      <p class="section-intro">Every check produces a structured result with an explicit status. A timeout, a refusal, a DNS failure, and an unreachable network are different crimes.</p>
+      <div class="evidence-grid">
+        <article class="evidence-card">
+          <h3>DNS</h3>
+          <p>Resolves hostnames through the OS resolver and records every address returned.</p>
+          <code>netsherlock dns example.com --json</code>
+        </article>
+        <article class="evidence-card">
+          <h3>Ping</h3>
+          <p>Checks reachability without assuming a failed probe means the host is down.</p>
+          <code>netsherlock ping example.com</code>
+        </article>
+        <article class="evidence-card">
+          <h3>Port</h3>
+          <p>Tests DNS, reachability, and a TCP port in one command.</p>
+          <code>netsherlock port example.com 443</code>
+        </article>
+        <article class="evidence-card">
+          <h3>Trace</h3>
+          <p>Records the route toward the destination with a bounded timeout.</p>
+          <code>netsherlock trace example.com</code>
+        </article>
+        <article class="evidence-card">
+          <h3>Inspect</h3>
+          <p>Runs multiple local checks from a generic JSON or YAML configuration.</p>
+          <code>netsherlock inspect network.yml</code>
+        </article>
+        <article class="evidence-card">
+          <h3>Structured output</h3>
+          <p>Every result can be emitted as JSON for scripts, dashboards, and further analysis.</p>
+          <code>netsherlock port example.com 443 --json | jq .</code>
+        </article>
+      </div>
+    </section>
+
+    <section class="method" id="method">
+      <h2>The method</h2>
+      <ol class="method-list">
+        <li>
+          <strong>Measurement</strong>
+          <p>Run the smallest useful check: resolve a name, open a socket, trace a route.</p>
+        </li>
+        <li>
+          <strong>Evidence</strong>
+          <p>Record what happened as a structured Result object with a precise status.</p>
+        </li>
+        <li>
+          <strong>Diagnosis</strong>
+          <p>Compare related results. Separate observed facts from possible explanations.</p>
+        </li>
+        <li>
+          <strong>Presentation</strong>
+          <p>Render human-readable findings that state only what the evidence proves.</p>
+        </li>
+      </ol>
+    </section>
+
+    <section class="install" id="install">
+      <h2>Install from source</h2>
+      <pre><code>git clone https://github.com/wuisabel-gif/netsherlock.git
+cd netsherlock
+perl Makefile.PL
+make test
+make install
+
+netsherlock --version</code></pre>
+    </section>
+
+    <section class="docs" id="docs">
+      <h2>Field notes</h2>
+      <div class="notes">
+        <article>
+          <h3>Read-only by default</h3>
+          <p>NetSherlock never changes routes, firewalls, services, DNS configuration, or passwords unless a future command explicitly asks for confirmation.</p>
+        </article>
+        <article>
+          <h3>Deterministic tests</h3>
+          <p>Tests use localhost, temporary TCP servers, injected resolvers, and fixtures. They do not require public Internet hosts.</p>
+        </article>
+        <article>
+          <h3>Exit codes</h3>
+          <p>0 = success, 1 = observed network/service failure, 2 = invalid input/configuration, 3 = internal error.</p>
+        </article>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <p>NetSherlock is an independent, general-purpose project. No course material, testbed scripts, or assignment code is used.</p>
+    <p>Licensed under the MIT License.</p>
+  </footer>
+</body>
+</html>
