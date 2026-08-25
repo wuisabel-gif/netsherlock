@@ -1,0 +1,16 @@
+# Generic local checks. The initial inspect command runs checks whose
+# source is local; remote sources are reserved for the SSH phase.
+hosts:
+  web:
+    address: 192.0.2.20
+  database:
+    address: 192.0.2.30
+checks:
+  - from: local
+    to: web
+    protocol: tcp
+    port: 443
+  - from: local
+    to: database
+    protocol: tcp
+    port: 5432

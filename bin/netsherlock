@@ -1,0 +1,431 @@
+#!/usr/bin/env perl
+
+use strict;
+use warnings;
+
+use FindBin qw($Bin);
+use lib "$Bin/../lib";
+
+use Getopt::Long qw(GetOptionsFromArray);
+use JSON::PP ();
+use Time::HiRes ();
+
+use NetSherlock ();
+use NetSherlock::Config;
+use NetSherlock::DNS;
+use NetSherlock::Diagnose;
+use NetSherlock::Ping;
+use NetSherlock::Port;
+use NetSherlock::Reporter;
+use NetSherlock::Result;
+use NetSherlock::Trace;
+
+exit main(@ARGV);
+
+sub main {
+    my @args = @_;
+    my %options;
+
+    my $parsed = GetOptionsFromArray(
+        \@args,
+        'help|h'      => \$options{help},
+        'version|v'   => \$options{version},
+        'json'        => \$options{json},
+        'timeout=f'   => \$options{timeout},
+        'verbose'     => \$options{verbose},
+        'quiet'       => \$options{quiet},
+        'max-hops=i'  => \$options{max_hops},
+    );
+
+    if ( !$parsed ) {
+        print STDERR "Try 'netsherlock --help' for usage.\n";
+        return 2;
+    }
+
+    if ( $options{version} ) {
+        print "NetSherlock $NetSherlock::VERSION\n";
+        return 0;
+    }
+
+    my $command = shift @args;
+    if ( !defined $command ) {
+        print $options{help} ? usage() : usage();
+        return $options{help} ? 0 : 2;
+    }
+
+    if ( $options{help} ) {
+        print command_usage($command);
+        return 0;
+    }
+
+    if ( $command eq 'help' ) {
+        print command_usage( shift(@args) // '' );
+        return 0;
+    }
+
+    if ( $command !~ /^(?:ping|port|dns|trace|inspect)$/ ) {
+        print STDERR "Unknown command '$command'.\n";
+        print STDERR "Try 'netsherlock --help' for usage.\n";
+        return 2;
+    }
+
+    my $timeout = defined $options{timeout} ? $options{timeout} : 5;
+    if ( $timeout <= 0 ) {
+        print STDERR "--timeout must be greater than zero.\n";
+        return 2;
+    }
+    if ( defined $options{max_hops} && $options{max_hops} < 1 ) {
+        print STDERR "--max-hops must be greater than zero.\n";
+        return 2;
+    }
+    $options{timeout} = $timeout;
+
+    my $validation_error = _validate_arguments( $command, \@args );
+    if ($validation_error) {
+        print STDERR "$validation_error\n";
+        print STDERR command_usage($command);
+        return 2;
+    }
+
+    my $logger = $options{verbose} ? sub { print STDERR "[debug] $_[0]\n" } : undef;
+    my ( $report, $exit_code );
+
+    my $ok = eval {
+        if ( $command eq 'dns' ) {
+            $report = _run_dns( $args[0], \%options, $logger );
+        }
+        elsif ( $command eq 'ping' ) {
+            $report = _run_ping( $args[0], \%options, $logger );
+        }
+        elsif ( $command eq 'port' ) {
+            $report = _run_port( $args[0], $args[1], \%options, $logger );
+        }
+        elsif ( $command eq 'trace' ) {
+            $report = _run_trace( $args[0], \%options, $logger );
+        }
+        elsif ( $command eq 'inspect' ) {
+            $report = _run_inspect( $args[0], \%options, $logger );
+        }
+        1;
+    };
+
+    if ( !$ok ) {
+        my $error = $@ || 'unknown internal error';
+        chomp $error;
+        if ( $command eq 'inspect' ) {
+            print STDERR "Invalid configuration: $error\n";
+            return 2;
+        }
+        print STDERR "NetSherlock internal error: $error\n";
+        return 3;
+    }
+
+    if ( $options{json} ) {
+        print NetSherlock::Reporter::json(
+            results   => $report->{results},
+            diagnosis => $report->{diagnosis},
+            extra     => $report->{extra},
+        );
+    }
+    else {
+        print NetSherlock::Reporter::human(
+            title     => $report->{title},
+            target    => $report->{target},
+            results   => $report->{results},
+            diagnosis => $report->{diagnosis},
+            groups    => $report->{groups},
+            quiet     => $options{quiet},
+        );
+    }
+
+    return _exit_code( $report->{results}, $report->{diagnosis} );
+}
+
+sub _run_dns {
+    my ( $host, $options, $logger ) = @_;
+    my $result = _dns_with_timeout( $host, $options->{timeout}, $logger );
+    return _report( "DNS: $host", $host, [$result] );
+}
+
+sub _run_ping {
+    my ( $host, $options, $logger ) = @_;
+    my @results;
+    my $dns = _dns_with_timeout( $host, $options->{timeout}, $logger );
+    push @results, $dns;
+
+    if ( $dns->success ) {
+        push @results, NetSherlock::Ping::check(
+            host     => $host,
+            timeout  => $options->{timeout},
+            logger   => $logger,
+        );
+    }
+    else {
+        push @results, _skipped( 'ping', $host, 'DNS resolution failed' );
+    }
+
+    return _report( "Ping: $host", $host, \@results );
+}
+
+sub _run_port {
+    my ( $host, $port, $options, $logger ) = @_;
+    my @results;
+    my $dns = _dns_with_timeout( $host, $options->{timeout}, $logger );
+    push @results, $dns;
+
+    if ( $dns->success ) {
+        push @results, NetSherlock::Ping::check(
+            host    => $host,
+            timeout => $options->{timeout},
+            logger  => $logger,
+        );
+        push @results, NetSherlock::Port::check(
+            host    => $host,
+            port    => $port,
+            timeout => $options->{timeout},
+            logger  => $logger,
+        );
+    }
+    else {
+        push @results, _skipped( 'ping', $host, 'DNS resolution failed' );
+        push @results, _skipped( 'tcp', $host, 'DNS resolution failed', $port );
+    }
+
+    return _report( "Port: $host:$port", "$host:$port", \@results );
+}
+
+sub _run_trace {
+    my ( $host, $options, $logger ) = @_;
+    my @results;
+    my $dns = _dns_with_timeout( $host, $options->{timeout}, $logger );
+    push @results, $dns;
+
+    if ( $dns->success ) {
+        my ($address) = grep { /\./ } @{ $dns->detail->{addresses} || [] };
+        $address //= $dns->detail->{addresses}[0];
+        push @results, NetSherlock::Trace::check(
+            host             => $address,
+            display_target   => $host,
+            expected_address => $address,
+            timeout          => $options->{timeout},
+            max_hops         => $options->{max_hops} // 30,
+            logger           => $logger,
+        );
+    }
+    else {
+        push @results, _skipped( 'trace', $host, 'DNS resolution failed' );
+    }
+
+    return _report( "Trace: $host", $host, \@results );
+}
+
+sub _run_inspect {
+    my ( $path, $options, $logger ) = @_;
+    my $config = NetSherlock::Config->load_file($path);
+    my @all_results;
+    my @check_reports;
+
+    for my $index ( 0 .. $#{ $config->{checks} || [] } ) {
+        my $check = $config->{checks}[$index];
+        my $to = $check->{to};
+        my $host = $config->{hosts}{$to}{address};
+        my $label = "check[$index] $check->{from} -> $to $check->{protocol}/$check->{port}";
+        my @results;
+
+        if ( $check->{from} ne 'local' ) {
+            push @results, NetSherlock::Result->new(
+                check   => 'tcp',
+                target  => $host,
+                port    => $check->{port},
+                success => 0,
+                status  => 'unsupported',
+                error   => "remote source '$check->{from}' is not implemented yet",
+                detail  => { from => $check->{from}, to => $to },
+            );
+        }
+        else {
+            my $dns = _dns_with_timeout( $host, $options->{timeout}, $logger );
+            push @results, $dns;
+            if ( $dns->success ) {
+                push @results, NetSherlock::Port::check(
+                    host    => $host,
+                    port    => $check->{port},
+                    timeout => $options->{timeout},
+                    logger  => $logger,
+                );
+            }
+            else {
+                push @results, _skipped( 'tcp', $host, 'DNS resolution failed', $check->{port} );
+            }
+        }
+
+        my $diagnosis = NetSherlock::Diagnose::analyze( results => \@results );
+        push @all_results, @results;
+        push @check_reports,
+          {
+            name      => $label,
+            target    => $host . ':' . $check->{port},
+            results   => \@results,
+            diagnosis => $diagnosis,
+          };
+    }
+
+    my @all_interpretations = map { @{ $_->{diagnosis}{interpretations} || [] } } @check_reports;
+    my @all_facts = map { @{ $_->{diagnosis}{facts} || [] } } @check_reports;
+    my @all_next = map { @{ $_->{diagnosis}{next_steps} || [] } } @check_reports;
+    my $failed = grep { !$_->success } @all_results;
+    my $diagnosis = {
+        summary         => $failed ? 'One or more configured checks failed.' : 'All configured checks succeeded.',
+        facts           => \@all_facts,
+        interpretations => \@all_interpretations,
+        next_steps      => \@all_next,
+        has_failure     => $failed ? 1 : 0,
+        checks          => [ map { { name => $_->{name}, diagnosis => $_->{diagnosis} } } @check_reports ],
+    };
+
+    return {
+        title     => 'NetSherlock configuration inspection',
+        target    => $path,
+        results   => \@all_results,
+        diagnosis => $diagnosis,
+        extra     => {
+            configuration => $config,
+            checks        => [
+                map {
+                    {
+                        name      => $_->{name},
+                        target    => $_->{target},
+                        results   => [ map { $_->to_hash } @{ $_->{results} || [] } ],
+                        diagnosis => $_->{diagnosis},
+                    }
+                } @check_reports
+            ],
+        },
+        groups    => \@check_reports,
+    };
+}
+
+sub _dns_with_timeout {
+    my ( $host, $timeout, $logger ) = @_;
+    my $result;
+    my $timed_out = 0;
+
+    eval {
+        local $SIG{ALRM} = sub { die "DNS timeout\n" };
+        Time::HiRes::alarm($timeout);
+        $result = NetSherlock::DNS::resolve( host => $host, logger => $logger );
+        Time::HiRes::alarm(0);
+    };
+    my $error = $@;
+    Time::HiRes::alarm(0);
+
+    if ($error) {
+        chomp $error;
+        $timed_out = 1 if $error eq 'DNS timeout';
+        return NetSherlock::Result->new(
+            check   => 'dns',
+            target  => $host,
+            success => 0,
+            status  => $timed_out ? 'timeout' : 'unknown',
+            error   => $timed_out ? "resolver exceeded the ${timeout}s timeout" : $error,
+        );
+    }
+
+    return $result;
+}
+
+sub _skipped {
+    my ( $check, $target, $reason, $port ) = @_;
+    return NetSherlock::Result->new(
+        check   => $check,
+        target  => $target,
+        port    => $port,
+        success => 0,
+        status  => 'skipped',
+        error   => $reason,
+    );
+}
+
+sub _report {
+    my ( $title, $target, $results ) = @_;
+    return {
+        title     => $title,
+        target    => $target,
+        results   => $results,
+        diagnosis => NetSherlock::Diagnose::analyze( results => $results ),
+        extra     => {},
+    };
+}
+
+sub _exit_code {
+    my ( $results, $diagnosis ) = @_;
+    return 0 unless $diagnosis->{has_failure};
+
+    # An unsupported remote source is a valid but unavailable feature, not a
+    # network observation. Treat it as an invalid/unsupported configuration.
+    return 2 if grep { $_->status eq 'unsupported' } @$results;
+    return 1;
+}
+
+sub _validate_arguments {
+    my ( $command, $args ) = @_;
+    my %counts = ( ping => 1, dns => 1, trace => 1, port => 2, inspect => 1 );
+    my $expected = $counts{$command};
+    return "'$command' requires $expected argument" if @$args < $expected;
+    return "'$command' accepts exactly $expected argument(s)" if @$args > $expected;
+
+    for my $arg (@$args) {
+        return 'arguments must not be empty' unless defined $arg && length $arg;
+        return "invalid argument '$arg'" if $arg =~ /^-/ || $arg =~ /[\0\n\r]/;
+    }
+
+    if ( $command eq 'port' ) {
+        return 'PORT must be an integer from 1 to 65535'
+          unless $args->[1] =~ /^\d+$/ && $args->[1] >= 1 && $args->[1] <= 65535;
+    }
+
+    return undef;
+}
+
+sub usage {
+    return <<'USAGE';
+Usage: netsherlock [OPTIONS] COMMAND [ARGS]
+
+Evidence-driven network diagnostics for ordinary hosts and services.
+
+Commands:
+  ping HOST             Check basic host reachability
+  port HOST PORT        Check DNS, reachability, and a TCP port
+  dns HOST              Resolve a hostname
+  trace HOST            Record the route toward a host
+  inspect CONFIG        Run local checks from a JSON or simple YAML config
+
+Options:
+  --json                Emit machine-readable JSON
+  --timeout SECONDS     Bound network operations (default: 5; trace uses 5 too)
+  --max-hops N          Maximum route hops (default: 30)
+  --verbose             Write diagnostic steps to stderr
+  --quiet               Suppress individual observations in human output
+  --help                Show this help
+  --version             Show the version
+
+Exit codes:
+  0  requested diagnostic succeeded
+  1  a network or service failure was observed
+  2  invalid command, arguments, or configuration
+  3  internal error
+USAGE
+}
+
+sub command_usage {
+    my ($command) = @_;
+    return usage() unless defined $command && length $command;
+    return "Usage: netsherlock $command HOST [OPTIONS]\n\n"
+      . ( $command eq 'ping'  ? 'Check host reachability without assuming a failed probe means the host is down.\n'
+        : $command eq 'dns'   ? 'Resolve HOST using the operating system resolver.\n'
+        : $command eq 'trace' ? 'Record the route toward HOST using the system traceroute tool.\n'
+        : $command eq 'port'  ? 'Check DNS, reachability, and a TCP service port.\nUsage: netsherlock port HOST PORT [OPTIONS]\n'
+        : $command eq 'inspect' ? 'Run checks from a generic local-diagnostics configuration file.\n'
+        : "Unknown command '$command'.\n" )
+      . "\nOptions may be placed before or after the command.\n";
+}
