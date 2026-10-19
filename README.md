@@ -47,6 +47,7 @@ netsherlock port HOST PORT
 netsherlock dns HOST
 netsherlock trace HOST
 netsherlock inspect CONFIG
+netsherlock triage LOGFILE
 ```
 
 Every command has its own help page, for example
@@ -116,6 +117,31 @@ Remote `from` values are represented as unsupported evidence until the
 explicit SSH phase is implemented. Configuration values are treated as data;
 NetSherlock does not interpolate them into shell commands. A malformed or
 unsupported configuration exits with code `2`.
+
+## Traffic triage
+
+`triage` ingests request records and flags likely attack traffic by request
+*content and behavior*, never by source IP — an address proves nothing about
+intent when attackers alias many IPs and legitimate and hostile clients look
+identical. It accepts Apache/nginx combined/common access-log lines and
+generic JSON-per-line records (`{"method":...,"url":...,"status":...,"user_agent":...,"ts":...}`).
+
+```sh
+netsherlock triage examples/sample-access.log
+netsherlock triage access.log --json | jq '.summary'
+```
+
+Each flagged request gets a verdict, one or more short reasons, and a `0..1`
+confidence score. Per-request signatures cover SQL injection, path traversal,
+XSS, command injection, sensitive-path enumeration, and known scanner
+User-Agents. Aggregate signals — auth brute-force (many failed authentications
+against one endpoint) and abnormal request rate (a burst to one path in a short
+window) — are grouped by target resource, not by client. Legitimate requests
+are not reported; they are served.
+
+Calibration knobs: `--window SECONDS` (bucket width, default 10), `--rate N`
+(requests per window per path before "abnormal", default 20), and `--fails N`
+(failed auths per window per path before "brute-force", default 5).
 
 ## Exit codes
 
