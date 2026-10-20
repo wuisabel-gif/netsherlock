@@ -88,6 +88,15 @@ sub json {
 
 sub _result_line {
     my ($result) = @_;
+
+    if ( $result->check eq 'request' ) {
+        my $d    = $result->detail || {};
+        my $line = defined $d->{line} ? "line $d->{line} " : '';
+        my $verb = defined $d->{method} ? $d->{method} . ' ' : '';
+        my $conf = defined $d->{confidence} ? sprintf( ' (confidence %.2f)', $d->{confidence} ) : '';
+        return "[FLAG] ${line}${verb}" . ( $result->target // '' ) . ": " . $result->status . $conf;
+    }
+
     my $mark = $result->success ? '[OK]' : '[FAIL]';
     my %labels = ( dns => 'DNS', ping => 'Ping', tcp => 'TCP', trace => 'Trace' );
     my $label = $result->check eq 'tcp'
@@ -106,6 +115,9 @@ sub _detail_lines {
 
     if ( $result->check eq 'dns' && ref( $detail->{addresses} ) eq 'ARRAY' ) {
         push @lines, map { '    ' . $_ } @{ $detail->{addresses} };
+    }
+    elsif ( $result->check eq 'request' && ref( $detail->{reasons} ) eq 'ARRAY' ) {
+        push @lines, map { '    - ' . $_ } @{ $detail->{reasons} };
     }
     elsif ( $result->check eq 'trace' && ref( $detail->{hops} ) eq 'ARRAY' ) {
         for my $hop ( @{ $detail->{hops} } ) {

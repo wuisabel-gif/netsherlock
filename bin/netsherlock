@@ -19,6 +19,7 @@ use NetSherlock::Port;
 use NetSherlock::Reporter;
 use NetSherlock::Result;
 use NetSherlock::Trace;
+use NetSherlock::Triage;
 
 exit main(@ARGV);
 
@@ -35,6 +36,9 @@ sub main {
         'verbose'     => \$options{verbose},
         'quiet'       => \$options{quiet},
         'max-hops=i'  => \$options{max_hops},
+        'window=f'    => \$options{window},
+        'rate=i'      => \$options{rate},
+        'fails=i'     => \$options{fails},
     );
 
     if ( !$parsed ) {
@@ -63,7 +67,7 @@ sub main {
         return 0;
     }
 
-    if ( $command !~ /^(?:ping|port|dns|trace|inspect)$/ ) {
+    if ( $command !~ /^(?:ping|port|dns|trace|inspect|triage)$/ ) {
         print STDERR "Unknown command '$command'.\n";
         print STDERR "Try 'netsherlock --help' for usage.\n";
         return 2;
@@ -106,6 +110,9 @@ sub main {
         elsif ( $command eq 'inspect' ) {
             $report = _run_inspect( $args[0], \%options, $logger );
         }
+        elsif ( $command eq 'triage' ) {
+            $report = _run_triage( $args[0], \%options, $logger );
+        }
         1;
     };
 
@@ -114,6 +121,10 @@ sub main {
         chomp $error;
         if ( $command eq 'inspect' ) {
             print STDERR "Invalid configuration: $error\n";
+            return 2;
+        }
+        if ( $command eq 'triage' ) {
+            print STDERR "Cannot ingest log: $error\n";
             return 2;
         }
         print STDERR "NetSherlock internal error: $error\n";
@@ -305,6 +316,64 @@ sub _run_inspect {
     };
 }
 
+sub _run_triage {
+    my ( $path, $options, $logger ) = @_;
+    die "no such file '$path'\n" unless -e $path;
+
+    open my $fh, '<', $path or die "cannot read '$path': $!\n";
+    local $/;
+    my $text = <$fh>;
+    close $fh;
+
+    $logger->("ingesting request records from $path") if $logger;
+    my $records = NetSherlock::Triage::parse_log($text);
+    my $report  = NetSherlock::Triage::classify(
+        records => $records,
+        window  => $options->{window},
+        rate    => $options->{rate},
+        fails   => $options->{fails},
+    );
+    $logger->( "classified $report->{total} record(s), flagged $report->{flagged}" ) if $logger;
+
+    my @facts = map { "$report->{categories}{$_} request(s) matched $_." }
+      sort keys %{ $report->{categories} };
+    my $summary = sprintf(
+        'Flagged %d of %d ingested request(s) as likely attack traffic; %d served as legitimate.',
+        $report->{flagged}, $report->{total}, $report->{clean},
+    );
+
+    my @next_steps;
+    if ( $report->{flagged} ) {
+        push @next_steps,
+          'Review the flagged requests and confirm against application and WAF logs before acting.';
+        push @next_steps,
+          'These are behavior- and content-based signals, not IP reputation; the same source may send both legitimate and hostile requests.';
+    }
+
+    my $diagnosis = {
+        summary         => $summary,
+        facts           => \@facts,
+        interpretations => NetSherlock::Triage::interpretations_for( $report->{categories} ),
+        next_steps      => \@next_steps,
+        has_failure     => $report->{flagged} ? 1 : 0,
+    };
+
+    return {
+        title     => "Traffic triage: $path",
+        target    => $path,
+        results   => $report->{results},
+        diagnosis => $diagnosis,
+        extra     => {
+            summary => {
+                total      => $report->{total},
+                flagged    => $report->{flagged},
+                clean      => $report->{clean},
+                categories => $report->{categories},
+            },
+        },
+    };
+}
+
 sub _dns_with_timeout {
     my ( $host, $timeout, $logger ) = @_;
     my $result;
@@ -369,7 +438,7 @@ sub _exit_code {
 
 sub _validate_arguments {
     my ( $command, $args ) = @_;
-    my %counts = ( ping => 1, dns => 1, trace => 1, port => 2, inspect => 1 );
+    my %counts = ( ping => 1, dns => 1, trace => 1, port => 2, inspect => 1, triage => 1 );
     my $expected = $counts{$command};
     return "'$command' requires $expected argument" if @$args < $expected;
     return "'$command' accepts exactly $expected argument(s)" if @$args > $expected;
@@ -399,11 +468,15 @@ Commands:
   dns HOST              Resolve a hostname
   trace HOST            Record the route toward a host
   inspect CONFIG        Run local checks from a JSON or simple YAML config
+  triage LOGFILE        Flag likely attack traffic in an access log by behavior
 
 Options:
   --json                Emit machine-readable JSON
   --timeout SECONDS     Bound network operations (default: 5; trace uses 5 too)
   --max-hops N          Maximum route hops (default: 30)
+  --window SECONDS      triage: rate/brute-force bucket width (default: 10)
+  --rate N              triage: requests per window per path before "abnormal" (default: 20)
+  --fails N             triage: failed auths per window per path before "brute-force" (default: 5)
   --verbose             Write diagnostic steps to stderr
   --quiet               Suppress individual observations in human output
   --help                Show this help
@@ -426,6 +499,7 @@ sub command_usage {
         : $command eq 'trace' ? 'Record the route toward HOST using the system traceroute tool.\n'
         : $command eq 'port'  ? 'Check DNS, reachability, and a TCP service port.\nUsage: netsherlock port HOST PORT [OPTIONS]\n'
         : $command eq 'inspect' ? 'Run checks from a generic local-diagnostics configuration file.\n'
+        : $command eq 'triage' ? "Flag likely attack traffic in an access log by request behavior, not source IP.\nUsage: netsherlock triage LOGFILE [--window S] [--rate N] [--fails N]\n"
         : "Unknown command '$command'.\n" )
       . "\nOptions may be placed before or after the command.\n";
 }
