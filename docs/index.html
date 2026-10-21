@@ -20,6 +20,7 @@
       <a href="#case">The Case</a>
       <a href="#evidence">Evidence</a>
       <a href="#method">Method</a>
+      <a href="#triage">Triage</a>
       <a href="#install">Install</a>
       <a href="#docs">Docs</a>
       <a class="github-link" href="https://github.com/wuisabel-gif/netsherlock" aria-label="NetSherlock on GitHub">GitHub</a>
@@ -77,6 +78,11 @@
           <code>netsherlock inspect network.yml</code>
         </article>
         <article class="evidence-card">
+          <h3>Triage</h3>
+          <p>Reads an access log and flags attack traffic by what a request does, never by where it came from.</p>
+          <code>netsherlock triage access.log</code>
+        </article>
+        <article class="evidence-card">
           <h3>Structured output</h3>
           <p>Every result can be emitted as JSON for scripts, dashboards, and further analysis.</p>
           <code>netsherlock port example.com 443 --json | jq .</code>
@@ -104,6 +110,29 @@
           <p>Render human-readable findings that state only what the evidence proves.</p>
         </li>
       </ol>
+    </section>
+
+    <section class="hero" id="triage">
+      <div class="hero-card">
+        <h2>Judge the request, not the address</h2>
+        <p>Attackers alias many IPs, and a hostile address looks exactly like an honest one. So <code>triage</code> ignores the source entirely. It reads Apache/nginx access logs or JSON request records and convicts on behavior alone: injection payloads, traversal sequences, scanner fingerprints, brute-force bursts, abnormal request rates.</p>
+        <p>Every flagged request carries a reason and a confidence score. Every legitimate request is left alone — served, not suspected.</p>
+        <div class="hero-actions">
+          <a class="button primary" href="https://github.com/wuisabel-gif/netsherlock#traffic-triage">Read the triage notes</a>
+        </div>
+      </div>
+      <aside class="case-file" aria-label="Sample triage case file">
+        <h3>Case file: sample-access.log</h3>
+        <div class="file-line"><span class="check ok">✓</span> GET /products?category=books · served</div>
+        <div class="file-line"><span class="check fail">✗</span> GET /products?id=10 UNION SELECT… · 0.80</div>
+        <div class="file-line"><span class="check fail">✗</span> GET /download?file=../../etc/passwd · 0.80</div>
+        <div class="file-line"><span class="check fail">✗</span> GET /?page=1 · sqlmap User-Agent · 0.70</div>
+        <div class="file-line"><span class="check fail">✗</span> POST /login ×6 · 401 · brute-force · 0.70</div>
+        <div class="file-line"><span class="check ok">✓</span> POST /login · 200 · served</div>
+        <div class="verdict">
+          <strong>Verdict:</strong> 12 of 18 requests flagged as likely attack traffic; 6 served. The same client sent both honest and hostile requests — only the hostile ones were stopped.
+        </div>
+      </aside>
     </section>
 
     <section class="install" id="install">
