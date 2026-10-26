@@ -20,6 +20,8 @@ use NetSherlock::Reporter;
 use NetSherlock::Result;
 use NetSherlock::Trace;
 use NetSherlock::Triage;
+use NetSherlock::Dashboard;
+use NetSherlock::Alert;
 
 exit main(@ARGV);
 
@@ -39,6 +41,16 @@ sub main {
         'window=f'    => \$options{window},
         'rate=i'      => \$options{rate},
         'fails=i'     => \$options{fails},
+        'interval=f'  => \$options{interval},
+        'once'        => \$options{once},
+        'recent=i'    => \$options{recent},
+        'top=i'       => \$options{top},
+        'webhook=s'       => \$options{webhook},
+        'webhook-format=s'=> \$options{webhook_format},
+        'min-confidence=f'=> \$options{min_confidence},
+        'debounce=f'  => \$options{debounce},
+        'dry-run!'    => \$options{dry_run},
+        'from-start'  => \$options{from_start},
     );
 
     if ( !$parsed ) {
@@ -67,7 +79,7 @@ sub main {
         return 0;
     }
 
-    if ( $command !~ /^(?:ping|port|dns|trace|inspect|triage)$/ ) {
+    if ( $command !~ /^(?:ping|port|dns|trace|inspect|triage|dashboard|alert)$/ ) {
         print STDERR "Unknown command '$command'.\n";
         print STDERR "Try 'netsherlock --help' for usage.\n";
         return 2;
@@ -92,6 +104,16 @@ sub main {
     }
 
     my $logger = $options{verbose} ? sub { print STDERR "[debug] $_[0]\n" } : undef;
+
+    # The live views manage their own output loop rather than the one-shot
+    # report -> Reporter path, so dispatch them here.
+    if ( $command eq 'dashboard' ) {
+        return _run_dashboard( $args[0], \%options, $logger );
+    }
+    if ( $command eq 'alert' ) {
+        return _run_alert( $args[0], \%options, $logger );
+    }
+
     my ( $report, $exit_code );
 
     my $ok = eval {
@@ -374,6 +396,158 @@ sub _run_triage {
     };
 }
 
+# Feature A: refreshing terminal dashboard over the same log triage ingests.
+sub _run_dashboard {
+    my ( $path, $options, $logger ) = @_;
+    die "no such file '$path'\n" unless -e $path;
+
+    my $interval = defined $options->{interval} ? $options->{interval} : 2;
+    # One-shot when asked, when piped (not a TTY), or when the interval is zero.
+    my $once = $options->{once} || $interval <= 0 || !( -t STDOUT );
+
+    my $draw = sub {
+        my $records = NetSherlock::Triage::parse_log( _slurp($path) );
+        my $report  = NetSherlock::Triage::classify(
+            records => $records,
+            window  => $options->{window},
+            rate    => $options->{rate},
+            fails   => $options->{fails},
+        );
+        my $board = NetSherlock::Dashboard::render(
+            report  => $report,
+            records => $records,
+            path    => $path,
+            recent  => $options->{recent},
+            top     => $options->{top},
+        );
+        return ( $board, $report->{flagged} );
+    };
+
+    if ($once) {
+        my ( $board, $flagged ) = $draw->();
+        print $board;
+        return $flagged ? 1 : 0;
+    }
+
+    local $SIG{INT} = sub { print "\e[2J\e[H"; exit 0 };    # clean exit on Ctrl-C
+    $logger->("dashboard refreshing every ${interval}s; Ctrl-C to stop") if $logger;
+    while (1) {
+        my ( $board ) = $draw->();
+        print "\e[2J\e[H", $board, "\n(refreshing every ${interval}s - Ctrl-C to stop)\n";
+        Time::HiRes::sleep($interval);
+    }
+    return 0;
+}
+
+# Feature B: tail -F the log and POST an alert when a request is flagged above
+# the confidence threshold. Dry-run by default; debounced so one scan is one
+# alert, not five hundred.
+sub _run_alert {
+    my ( $path, $options, $logger ) = @_;
+    die "no such file '$path'\n" unless -e $path;
+
+    my $dry_run = defined $options->{dry_run} ? $options->{dry_run} : 1;    # default dry-run
+    my $webhook = defined $options->{webhook} ? $options->{webhook} : $ENV{NETSHERLOCK_WEBHOOK};
+    my $min     = defined $options->{min_confidence} ? $options->{min_confidence} : $NetSherlock::Triage::THRESHOLD;
+    my $interval= defined $options->{interval} ? $options->{interval} : 1;
+
+    if ( !$dry_run && !( defined $webhook && length $webhook ) ) {
+        die "live alerting needs a webhook (--webhook URL or NETSHERLOCK_WEBHOOK); use --dry-run to preview\n";
+    }
+
+    my $alert = NetSherlock::Alert->new(
+        url      => $webhook,
+        format   => $options->{webhook_format},
+        debounce => $options->{debounce},
+        dry_run  => $dry_run,
+    );
+
+    # Rolling buffer of recent records so aggregate signals (brute-force, rate)
+    # still fire in a stream, not just per-request content. ponytail: bounded
+    # buffer + full reclassify per tick; fine for human-scale logs, swap for an
+    # incremental scorer if a firehose ever needs it.
+    my $MAX = 2000;
+    my ( @buf, $seq, %alerted );
+
+    my $feed = sub {
+        my ($text) = @_;
+        my $recs = NetSherlock::Triage::parse_log($text);
+        return unless @$recs;
+        $_->{line} = ++$seq for @$recs;    # stable global id for dedup
+        push @buf, @$recs;
+        splice @buf, 0, @buf - $MAX if @buf > $MAX;
+
+        my $report = NetSherlock::Triage::classify(
+            records => \@buf,
+            window  => $options->{window},
+            rate    => $options->{rate},
+            fails   => $options->{fails},
+        );
+        for my $r ( @{ $report->{results} } ) {
+            my $d  = $r->detail || {};
+            my $id = $d->{line};
+            next if defined $id && $alerted{$id}++;    # alert each request once
+            next if ( $d->{confidence} || 0 ) < $min;
+            my $out = $alert->deliver($r);
+            _report_alert( $out, $dry_run );
+        }
+    };
+
+    if ( $options->{once} ) {
+        $feed->( _slurp($path) );
+        printf STDERR "alert: %d sent, %d suppressed (dry-run=%d)\n",
+          $alert->{sent}, $alert->{suppressed}, $dry_run if $logger;
+        return 0;
+    }
+
+    # tail -F: start at EOF unless --from-start, then poll for appended lines
+    # and reopen on truncation/rotation.
+    open my $fh, '<', $path or die "cannot read '$path': $!\n";
+    my $pos = $options->{from_start} ? 0 : ( -s $path );
+    seek $fh, $pos, 0;
+    local $SIG{INT} = sub { exit 0 };
+    $logger->("watching $path (dry-run=$dry_run, min-confidence=$min); Ctrl-C to stop") if $logger;
+    while (1) {
+        my @new;
+        while ( my $line = <$fh> ) { push @new, $line }
+        $feed->( join( '', @new ) ) if @new;
+        seek $fh, 0, 1;    # clear EOF so the next read sees appended data
+
+        my $size = -s $path;
+        if ( defined $size && $size < tell($fh) ) {    # rotated/truncated
+            close $fh;
+            open $fh, '<', $path or die "cannot reopen '$path': $!\n";
+        }
+        Time::HiRes::sleep($interval);
+    }
+    return 0;
+}
+
+sub _report_alert {
+    my ( $out, $dry_run ) = @_;
+    my $payload = $out->{payload};
+    my $text = $payload ? ( $payload->{text} // $payload->{content} // '' ) : '';
+    if ( $out->{dry_run} ) {
+        print "[dry-run] would POST: $text\n";
+    }
+    elsif ( $out->{sent} ) {
+        print "[sent] $text\n";
+    }
+    elsif ( $out->{error} ) {
+        print STDERR "[error] $out->{error}: $text\n";
+    }
+    return;
+}
+
+sub _slurp {
+    my ($path) = @_;
+    open my $fh, '<', $path or die "cannot read '$path': $!\n";
+    local $/;
+    my $text = <$fh>;
+    close $fh;
+    return $text;
+}
+
 sub _dns_with_timeout {
     my ( $host, $timeout, $logger ) = @_;
     my $result;
@@ -438,7 +612,7 @@ sub _exit_code {
 
 sub _validate_arguments {
     my ( $command, $args ) = @_;
-    my %counts = ( ping => 1, dns => 1, trace => 1, port => 2, inspect => 1, triage => 1 );
+    my %counts = ( ping => 1, dns => 1, trace => 1, port => 2, inspect => 1, triage => 1, dashboard => 1, alert => 1 );
     my $expected = $counts{$command};
     return "'$command' requires $expected argument" if @$args < $expected;
     return "'$command' accepts exactly $expected argument(s)" if @$args > $expected;
@@ -469,14 +643,27 @@ Commands:
   trace HOST            Record the route toward a host
   inspect CONFIG        Run local checks from a JSON or simple YAML config
   triage LOGFILE        Flag likely attack traffic in an access log by behavior
+  dashboard LOGFILE     Live, refreshing attack-detection dashboard over a log
+  alert LOGFILE         Watch a log and POST webhook alerts on flagged attacks
 
 Options:
   --json                Emit machine-readable JSON
   --timeout SECONDS     Bound network operations (default: 5; trace uses 5 too)
   --max-hops N          Maximum route hops (default: 30)
-  --window SECONDS      triage: rate/brute-force bucket width (default: 10)
-  --rate N              triage: requests per window per path before "abnormal" (default: 20)
-  --fails N             triage: failed auths per window per path before "brute-force" (default: 5)
+  --window SECONDS      triage/dashboard/alert: rate/brute-force bucket width (default: 10)
+  --rate N              triage/dashboard/alert: requests/window/path before "abnormal" (default: 20)
+  --fails N             triage/dashboard/alert: failed auths/window/path before "brute-force" (default: 5)
+  --interval SECONDS    dashboard: redraw interval; alert: tail poll interval (default 2 / 1)
+  --once                dashboard/alert: process the log once and exit (no loop)
+  --recent N            dashboard: how many recent flagged requests to list (default 8)
+  --top N               dashboard: how many top source addresses to list (default 5)
+  --webhook URL         alert: Slack/Discord incoming-webhook URL (or NETSHERLOCK_WEBHOOK)
+  --webhook-format F    alert: slack | discord | auto (default auto, inferred from URL)
+  --min-confidence C    alert: only alert at/above this confidence (default 0.5)
+  --debounce SECONDS    alert: collapse repeat alerts per category+path (default 60)
+  --dry-run             alert: print what would be sent without posting (default on)
+  --no-dry-run          alert: actually POST (requires a webhook URL)
+  --from-start          alert: scan the whole file first, not just new lines
   --verbose             Write diagnostic steps to stderr
   --quiet               Suppress individual observations in human output
   --help                Show this help
@@ -500,6 +687,8 @@ sub command_usage {
         : $command eq 'port'  ? 'Check DNS, reachability, and a TCP service port.\nUsage: netsherlock port HOST PORT [OPTIONS]\n'
         : $command eq 'inspect' ? 'Run checks from a generic local-diagnostics configuration file.\n'
         : $command eq 'triage' ? "Flag likely attack traffic in an access log by request behavior, not source IP.\nUsage: netsherlock triage LOGFILE [--window S] [--rate N] [--fails N]\n"
+        : $command eq 'dashboard' ? "Live, refreshing dashboard of attack traffic in an access log.\nUsage: netsherlock dashboard LOGFILE [--interval S] [--recent N] [--top N] [--once]\n"
+        : $command eq 'alert' ? "Watch a log and POST a Slack/Discord webhook alert on each flagged attack.\nUsage: netsherlock alert LOGFILE [--webhook URL] [--min-confidence C] [--debounce S] [--dry-run] [--once]\n"
         : "Unknown command '$command'.\n" )
       . "\nOptions may be placed before or after the command.\n";
 }

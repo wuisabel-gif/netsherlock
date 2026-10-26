@@ -12,6 +12,7 @@ WriteMakefile(
     EXE_FILES    => ['bin/netsherlock'],
     PREREQ_PM    => {
         'Getopt::Long' => 0,
+        'HTTP::Tiny' => 0,
         'IO::Socket::INET' => 0,
         'JSON::PP' => 0,
         'Net::Ping' => 0,
