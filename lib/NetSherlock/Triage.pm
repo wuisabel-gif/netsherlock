@@ -144,6 +144,7 @@ sub _parse_access_line {
     my ( $path, $query ) = split /\?/, $uri, 2;
     return {
         source      => 'access_log',
+        ip          => $ip,    # display only - never used to classify (see DESCRIPTION)
         method      => $method,
         uri         => $uri,
         path        => $path,
@@ -179,6 +180,7 @@ sub _parse_json_record {
 
     return {
         source      => 'json',
+        ip          => _first( $obj, qw(ip remote_addr client client_ip addr) ),    # display only
         method      => uc $method,
         uri         => $uri,
         path        => $path,

@@ -48,6 +48,8 @@ netsherlock dns HOST
 netsherlock trace HOST
 netsherlock inspect CONFIG
 netsherlock triage LOGFILE
+netsherlock dashboard LOGFILE
+netsherlock alert LOGFILE
 ```
 
 Every command has its own help page, for example
@@ -142,6 +144,51 @@ are not reported; they are served.
 Calibration knobs: `--window SECONDS` (bucket width, default 10), `--rate N`
 (requests per window per path before "abnormal", default 20), and `--fails N`
 (failed auths per window per path before "brute-force", default 5).
+
+## Live dashboard
+
+`dashboard` runs the same classifier as `triage` over a log and renders a
+compact, refreshing board: request counts by category (SQLi, scanner,
+brute-force, XSS, path-traversal, command-injection, sensitive-path,
+rate-anomaly, and normal), the most recent flagged requests with their reason
+and confidence, and the busiest source addresses by volume.
+
+```sh
+netsherlock dashboard examples/sample-access.log      # live, redraws every 2s
+netsherlock dashboard /var/log/nginx/access.log --interval 1 --top 10
+netsherlock dashboard examples/sample-access.log --once   # render once, no loop
+```
+
+It redraws every `--interval` seconds (default 2) until Ctrl-C; `--once` (and
+piping to a non-terminal) renders a single frame. The source-address panel is
+**display only** — NetSherlock never bans or scores a client by address, since
+scanners, scoring services, and legitimate users share the same networks. The
+same `--window`/`--rate`/`--fails` knobs apply.
+
+## Alerting
+
+`alert` tails a log (`tail -F` style) and POSTs a message to a Slack or Discord
+incoming webhook each time a request is flagged above a confidence threshold.
+It is **dry-run by default** — it prints what it would send and posts nothing
+until you pass `--no-dry-run` with a webhook. A debounce collapses repeat
+alerts per category+path so one scan is one alert, not five hundred.
+
+```sh
+# preview what would fire, over the whole file, without sending anything
+netsherlock alert examples/sample-access.log --dry-run --from-start
+
+# live: follow new lines and post to Slack (or Discord — the shape is inferred)
+export NETSHERLOCK_WEBHOOK=https://hooks.slack.com/services/XXX/YYY/ZZZ
+netsherlock alert /var/log/nginx/access.log --no-dry-run --min-confidence 0.7
+```
+
+Options: `--webhook URL` (or the `NETSHERLOCK_WEBHOOK` env var),
+`--webhook-format slack|discord|auto` (default `auto`, inferred from the URL),
+`--min-confidence C` (default 0.5), `--debounce SECONDS` (default 60),
+`--from-start` (scan the existing file, not just new lines), and `--once`
+(process current contents and exit). Slack (`{"text":...}`) and Discord
+(`{"content":...}`) JSON shapes are both supported; delivery uses the core
+`HTTP::Tiny` (HTTPS needs `IO::Socket::SSL`).
 
 ## Exit codes
 
